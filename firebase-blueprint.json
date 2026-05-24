@@ -1,0 +1,45 @@
+{
+  "entities": {
+    "PortfolioItem": {
+      "title": "PortfolioItem",
+      "description": "A top-level category item of the portfolio",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "part": { "type": "string" },
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "time": { "type": "string" },
+        "image": { "type": "string" },
+        "description": { "type": "string" },
+        "tags": {
+          "type": "array"
+        },
+        "subProjects": {
+          "type": "array"
+        }
+      },
+      "required": ["id", "part", "title", "category", "time", "image", "description", "tags", "subProjects"]
+    },
+    "ImageOverride": {
+      "title": "ImageOverride",
+      "description": "Image override map mapping an originalUrl string to an uploadedUrl base64 or string",
+      "type": "object",
+      "properties": {
+        "originalUrl": { "type": "string" },
+        "uploadedUrl": { "type": "string" }
+      },
+      "required": ["originalUrl", "uploadedUrl"]
+    }
+  },
+  "firestore": {
+    "/portfolio/{itemId}": {
+      "schema": "PortfolioItem",
+      "description": "The category list in the portfolio"
+    },
+    "/image_overrides/{overrideId}": {
+      "schema": "ImageOverride",
+      "description": "Uploaded images or mapped image overrides"
+    }
+  }
+}

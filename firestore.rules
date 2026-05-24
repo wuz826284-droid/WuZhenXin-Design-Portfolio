@@ -1,0 +1,62 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidPortfolioItem(data) {
+      return data.keys().hasAll(['id', 'part', 'title', 'category', 'time', 'image', 'description', 'tags', 'subProjects'])
+        && data.keys().size() == 9
+        && data.id is string && data.id.size() <= 64
+        && data.part is string && data.part.size() <= 16
+        && data.title is string && data.title.size() <= 128
+        && data.category is string && data.category.size() <= 64
+        && data.time is string && data.time.size() <= 64
+        // Base64 images or asset paths can be very large, we limit them to 10MB to handle compressed base64 images
+        && data.image is string && data.image.size() <= 10485760
+        && data.description is string && data.description.size() <= 5000
+        && data.tags is list && data.tags.size() <= 20
+        && data.subProjects is list && data.subProjects.size() <= 50;
+    }
+
+    function isValidImageOverride(data) {
+      return data.keys().hasAll(['originalUrl', 'uploadedUrl'])
+        && data.keys().size() == 2
+        && data.originalUrl is string && data.originalUrl.size() <= 2048
+        && data.uploadedUrl is string && data.uploadedUrl.size() <= 10485760;
+    }
+
+    // Matches
+    match /portfolio/{itemId} {
+      allow read: if true;
+      allow create, update: if isSignedIn() && isValidId(itemId) && isValidPortfolioItem(incoming());
+      allow delete: if isSignedIn() && isValidId(itemId);
+    }
+
+    match /image_overrides/{overrideId} {
+      allow read: if true;
+      allow create, update: if isSignedIn() && isValidId(overrideId) && isValidImageOverride(incoming());
+      allow delete: if isSignedIn() && isValidId(overrideId);
+    }
+  }
+}
