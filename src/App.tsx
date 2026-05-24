@@ -203,7 +203,7 @@ const ImageUploadOverlay = ({
 };
 
 export default function App() {
-  const [isAdmin, setIsAdmin] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [imageOverrides, setImageOverrides] = useState<Record<string, string>>(() => {
     try {
       const saved = localStorage.getItem("wujiao_portfolio_image_overrides");
@@ -510,9 +510,9 @@ export default function App() {
 
       const overallSuccess = overridesSuccess && portfolioSuccess;
       if (overallSuccess) {
-        alert("🎉 保存并固化成功！所有新上传图片与修改已牢固同步到服务器底座中。");
+        console.log("Saving complete - changes synced successfully to custom node instance.");
       } else if (isFirebaseEnabled && firestoreSuccess) {
-        alert("🎉 保存并固化成功！数据已成功同步至 Firebase 云端数据库。");
+        console.log("Saving complete - changes synced successfully to Firestore database instance.");
       } else {
         // Both Express APIs + Firebase are unavailable. We are running on a static client host (e.g. Netlify).
         // Trigger the gorgeous Static Save status modal. This notifies them of successful browser cache persistence
