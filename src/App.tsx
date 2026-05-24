@@ -26,13 +26,55 @@ import React, { useState, useEffect, useRef } from "react";
 import { AnimatePresence } from "motion/react";
 import defaultOverrides from "./image-overrides.json";
 import portfolioItems from "./portfolio-data.json";
-import { isFirebaseEnabled } from "./firebase";
+import { isFirebaseEnabled, uploadImageToStorage } from "./firebase";
 import {
   fetchLivePortfolio,
   saveFullPortfolio,
   fetchLiveOverrides,
   saveLiveOverride
 } from "./firebaseSync";
+
+const handleImageUploadService = async (file: File, compressedBase64: string, originalUrl: string): Promise<string> => {
+  if (isFirebaseEnabled) {
+    try {
+      console.log("Uploading directly to Cloud Firebase Storage...");
+      const downloadUrl = await uploadImageToStorage(compressedBase64, originalUrl);
+      return downloadUrl;
+    } catch (storageErr) {
+      console.warn("Firebase Storage upload failed, attempting local backend server backup:", storageErr);
+    }
+  }
+
+  // Backup to Express local server /api/upload
+  try {
+    const response = await fetch("/api/upload", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileName: file.name.endsWith(".png") || file.name.endsWith(".jpg") || file.name.endsWith(".jpeg") ? file.name : "uploaded.jpg",
+        fileContent: compressedBase64,
+        originalUrl: originalUrl
+      })
+    });
+    
+    if (response.ok) {
+      const contentType = response.headers.get("Content-Type");
+      if (contentType && contentType.includes("json")) {
+        const data = await response.json();
+        if (data.success && data.relativeUrl) {
+          return data.relativeUrl;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Local backend /api/upload failed:", err);
+  }
+
+  // Absolute fallback: return compressed client-side base64
+  return compressedBase64;
+};
 
 const fadeIn = {
   initial: { opacity: 0, y: 20 },
@@ -137,34 +179,9 @@ const ImageUploadOverlay = ({
         // 2. Set the compressed base64 as the persistent override (immediate client preview)
         onUploaded(compressedBase64);
         
-        // 3. Simultaneously upload the compressed version to server to write to container static disk
-        const response = await fetch("/api/upload", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            fileName: file.name.endsWith(".png") || file.name.endsWith(".jpg") || file.name.endsWith(".jpeg") ? file.name : "uploaded.jpg",
-            fileContent: compressedBase64,
-            originalUrl: originalUrl
-          })
-        });
-        
-        if (response.ok) {
-          const contentType = response.headers.get("Content-Type");
-          if (contentType && contentType.includes("json")) {
-            const data = await response.json();
-            if (data.success && data.relativeUrl) {
-              console.log("Compressed image saved on current live server instance:", data.relativeUrl);
-              // Replace the temporary base64 with the permanent server relative path so it is durable for all users
-              onUploaded(data.relativeUrl);
-            }
-          } else {
-            console.warn("Upload response is not JSON. Falling back to local Base64 storage.");
-          }
-        } else {
-          console.warn("Server upload endpoint returned error status. Falling back to local Base64 storage.");
-        }
+        // 3. Simultaneously upload the compressed version to robust image storage service
+        const finalUrl = await handleImageUploadService(file, compressedBase64, originalUrl);
+        onUploaded(finalUrl);
       } catch (err) {
         console.error("Compression or upload process failed:", err);
       } finally {
@@ -697,43 +714,32 @@ export default function App() {
         const base64Content = reader.result as string;
         const compressedBase64 = await compressImage(base64Content);
         
-        const response = await fetch("/api/upload", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            fileName: file.name,
-            fileContent: compressedBase64,
-            originalUrl: `/assets/images/dynamic_${Date.now()}_${file.name}`
-          })
+        const targetUrl = await handleImageUploadService(
+          file, 
+          compressedBase64, 
+          `/assets/images/dynamic_${Date.now()}_${file.name}`
+        );
+        
+        const updatedSubProjects = selectedProject.subProjects.map((sub, sIdx) => {
+          if (sIdx === selectedGalleryItemIndex) {
+            return {
+              ...sub,
+              images: [...sub.images, targetUrl]
+            };
+          }
+          return sub;
         });
         
-        if (response.ok) {
-          const resJson = await response.json();
-          const targetUrl = resJson.relativeUrl || compressedBase64;
-          
-          const updatedSubProjects = selectedProject.subProjects.map((sub, sIdx) => {
-            if (sIdx === selectedGalleryItemIndex) {
-              return {
-                ...sub,
-                images: [...sub.images, targetUrl]
-              };
-            }
-            return sub;
-          });
-          
-          const updatedProject = {
-            ...selectedProject,
-            subProjects: updatedSubProjects
-          };
-          
-          const updatedProjects = projects.map(p => p.id === selectedProject.id ? updatedProject : p);
-          setSelectedProject(updatedProject);
-          savePortfolio(updatedProjects);
-          
-          setActiveImageIndex(updatedProject.subProjects[selectedGalleryItemIndex].images.length - 1);
-        }
+        const updatedProject = {
+          ...selectedProject,
+          subProjects: updatedSubProjects
+        };
+        
+        const updatedProjects = projects.map(p => p.id === selectedProject.id ? updatedProject : p);
+        setSelectedProject(updatedProject);
+        savePortfolio(updatedProjects);
+        
+        setActiveImageIndex(updatedProject.subProjects[selectedGalleryItemIndex].images.length - 1);
       };
       reader.readAsDataURL(file);
     } catch (err) {
@@ -2353,22 +2359,15 @@ export default function App() {
                         reader.onload = async () => {
                           const base64 = reader.result as string;
                           const compressed = await compressImage(base64);
-                          const response = await fetch("/api/upload", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              fileName: file.name,
-                              fileContent: compressed,
-                              originalUrl: `/assets/images/proj_${Date.now()}_${file.name}`
-                            })
+                          const finalUrl = await handleImageUploadService(
+                            file, 
+                            compressed, 
+                            `/assets/images/proj_${Date.now()}_${file.name}`
+                          );
+                          setEditingSubProject({
+                            ...editingSubProject,
+                            images: [...editingSubProject.images, finalUrl]
                           });
-                          if (response.ok) {
-                            const data = await response.json();
-                            setEditingSubProject({
-                              ...editingSubProject,
-                              images: [...editingSubProject.images, data.relativeUrl || compressed]
-                            });
-                          }
                         };
                         reader.readAsDataURL(file);
                       }}
