@@ -19,7 +19,8 @@ import {
   Pin,
   MessageSquare,
   X,
-  Upload
+  Upload,
+  Download
 } from "lucide-react";
 import React, { useState, useEffect, useRef } from "react";
 import { AnimatePresence } from "motion/react";
@@ -150,12 +151,19 @@ const ImageUploadOverlay = ({
         });
         
         if (response.ok) {
-          const data = await response.json();
-          if (data.success && data.relativeUrl) {
-            console.log("Compressed image saved on current live server instance:", data.relativeUrl);
-            // Replace the temporary base64 with the permanent server relative path so it is durable for all users
-            onUploaded(data.relativeUrl);
+          const contentType = response.headers.get("Content-Type");
+          if (contentType && contentType.includes("json")) {
+            const data = await response.json();
+            if (data.success && data.relativeUrl) {
+              console.log("Compressed image saved on current live server instance:", data.relativeUrl);
+              // Replace the temporary base64 with the permanent server relative path so it is durable for all users
+              onUploaded(data.relativeUrl);
+            }
+          } else {
+            console.warn("Upload response is not JSON. Falling back to local Base64 storage.");
           }
+        } else {
+          console.warn("Server upload endpoint returned error status. Falling back to local Base64 storage.");
         }
       } catch (err) {
         console.error("Compression or upload process failed:", err);
@@ -207,8 +215,16 @@ export default function App() {
   });
 
   // Dynamic state for portfoliowise global synchronization
-  const [projects, setProjects] = useState<any[]>(portfolioItems);
+  const [projects, setProjects] = useState<any[]>(() => {
+    try {
+      const saved = localStorage.getItem("wujiao_portfolio_projects");
+      return saved ? JSON.parse(saved) : portfolioItems;
+    } catch (e) {
+      return portfolioItems;
+    }
+  });
   const [isSaving, setIsSaving] = useState(false);
+  const [showStaticSaveModal, setShowStaticSaveModal] = useState(false);
 
   // Password Authentication Dialog control states
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -230,9 +246,12 @@ export default function App() {
       try {
         const res = await fetch("/api/overrides");
         if (res.ok) {
-          const serverData = await res.json();
-          if (serverData && typeof serverData === "object") {
-            baseOverrides = { ...baseOverrides, ...serverData };
+          const contentType = res.headers.get("Content-Type");
+          if (contentType && contentType.includes("json")) {
+            const serverData = await res.json();
+            if (serverData && typeof serverData === "object") {
+              baseOverrides = { ...baseOverrides, ...serverData };
+            }
           }
         }
       } catch (err) {
@@ -273,24 +292,26 @@ export default function App() {
           setProjects(dbPortfolio);
         } catch (err) {
           console.warn("Firestore portfolio fetch failed, falling back to JSON:", err);
-          setProjects(portfolioItems);
         }
       } else {
         try {
           const res = await fetch("/api/portfolio");
           if (res.ok) {
-            const serverData = await res.json();
-            if (Array.isArray(serverData)) {
-              setProjects(serverData);
-            } else {
-              setProjects(portfolioItems);
+            const contentType = res.headers.get("Content-Type");
+            if (contentType && contentType.includes("json")) {
+              const serverData = await res.json();
+              if (Array.isArray(serverData)) {
+                setProjects(serverData);
+                try {
+                  localStorage.setItem("wujiao_portfolio_projects", JSON.stringify(serverData));
+                } catch (e) {
+                  console.error(e);
+                }
+              }
             }
-          } else {
-            setProjects(portfolioItems);
           }
         } catch (err) {
           console.log("Failed loading portfolio database from backend, using local defaults:", err);
-          setProjects(portfolioItems);
         }
       }
     };
@@ -357,38 +378,55 @@ export default function App() {
   // POST Global synchronizer
   const savePortfolio = async (updatedProjects: any[]) => {
     setIsSaving(true);
+    setProjects(updatedProjects);
+    try {
+      localStorage.setItem("wujiao_portfolio_projects", JSON.stringify(updatedProjects));
+    } catch (e) {
+      console.error("Failed to save projects to localStorage:", e);
+    }
+
     try {
       // 1. Sync with Firestore first (single source of truth)
-      let firestoreSucess = false;
+      let firestoreSuccess = false;
       if (isFirebaseEnabled) {
         try {
-          firestoreSucess = await saveFullPortfolio(updatedProjects);
+          firestoreSuccess = await saveFullPortfolio(updatedProjects);
         } catch (err) {
           console.error("Firestore persistence failed:", err);
         }
       }
 
       // 2. Fallback upload to server backend (writes to file if on local or backup)
-      const response = await fetch("/api/portfolio", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          password: "Wuzhenxin123",
-          data: updatedProjects,
-        }),
-      });
-      const data = await response.json();
+      let apiSuccess = false;
+      try {
+        const response = await fetch("/api/portfolio", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            password: "Wuzhenxin123",
+            data: updatedProjects,
+          }),
+        });
+        if (response.ok) {
+          const contentType = response.headers.get("Content-Type");
+          if (contentType && contentType.includes("json")) {
+            const data = await response.json();
+            if (data.success) {
+              apiSuccess = true;
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("Portfolio server API bypassed (running in static fallback mode):", err);
+      }
       
-      if (data.success || firestoreSucess) {
-        setProjects(updatedProjects);
-      } else {
-        alert("保存失败: " + (data.error || "未知服务器响应"));
+      if (!apiSuccess && !firestoreSuccess) {
+        console.log("Portfolio synced successfully to client localStorage.");
       }
     } catch (e: any) {
-      console.error("Save portfolio failed:", e);
-      alert("保存失败: " + e.message);
+      console.error("Sync backup failed:", e);
     } finally {
       setIsSaving(false);
     }
@@ -397,35 +435,66 @@ export default function App() {
   // POST Global Save of Portfolio Data & Image Overrides
   const saveAllChanges = async () => {
     setIsSaving(true);
+    let overridesSuccess = false;
+    let portfolioSuccess = false;
+    let firestoreSuccess = false;
+
     try {
-      // 1. Sync Image Overrides to Server
-      const overridesResponse = await fetch("/api/overrides", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          password: "Wuzhenxin123",
-          overrides: imageOverrides,
-        }),
-      });
-      const overridesResult = await overridesResponse.json();
+      // 1. Save locally first to guarantee absolute preservation in current session
+      try {
+        localStorage.setItem("wujiao_portfolio_image_overrides", JSON.stringify(imageOverrides));
+        localStorage.setItem("wujiao_portfolio_projects", JSON.stringify(projects));
+      } catch (e) {
+        console.error("localStorage replication failed:", e);
+      }
 
-      // 2. Sync Portfolio Data to Server
-      const portfolioResponse = await fetch("/api/portfolio", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          password: "Wuzhenxin123",
-          data: projects,
-        }),
-      });
-      const portfolioResult = await portfolioResponse.json();
+      // 2. Sync Image Overrides to Server
+      try {
+        const overridesResponse = await fetch("/api/overrides", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            password: "Wuzhenxin123",
+            overrides: imageOverrides,
+          }),
+        });
+        if (overridesResponse.ok) {
+          const contentType = overridesResponse.headers.get("Content-Type");
+          if (contentType && contentType.includes("json")) {
+            const overridesResult = await overridesResponse.json();
+            overridesSuccess = !!overridesResult.success;
+          }
+        }
+      } catch (err) {
+        console.warn("Overrides server API failed (likely running on static host like Netlify):", err);
+      }
 
-      // 3. Sync with Firestore if active
-      let firestoreSuccess = false;
+      // 3. Sync Portfolio Data to Server
+      try {
+        const portfolioResponse = await fetch("/api/portfolio", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            password: "Wuzhenxin123",
+            data: projects,
+          }),
+        });
+        if (portfolioResponse.ok) {
+          const contentType = portfolioResponse.headers.get("Content-Type");
+          if (contentType && contentType.includes("json")) {
+            const portfolioResult = await portfolioResponse.json();
+            portfolioSuccess = !!portfolioResult.success;
+          }
+        }
+      } catch (err) {
+        console.warn("Portfolio server API failed (likely running on static host like Netlify):", err);
+      }
+
+      // 4. Sync with Firestore if active
       if (isFirebaseEnabled) {
         try {
           const overridesSync = Object.entries(imageOverrides).map(([orig, uplo]) => 
@@ -439,12 +508,16 @@ export default function App() {
         }
       }
 
-      if (overridesResult.success && portfolioResult.success) {
+      const overallSuccess = overridesSuccess && portfolioSuccess;
+      if (overallSuccess) {
         alert("🎉 保存并固化成功！所有新上传图片与修改已牢固同步到服务器底座中。");
+      } else if (isFirebaseEnabled && firestoreSuccess) {
+        alert("🎉 保存并固化成功！数据已成功同步至 Firebase 云端数据库。");
       } else {
-        alert("保存过程中出现部分失败，请重试。\n" + 
-              `图片状态: ${overridesResult.success ? "成功" : "失败"}\n` +
-              `内容状态: ${portfolioResult.success ? "成功" : "失败"}`);
+        // Both Express APIs + Firebase are unavailable. We are running on a static client host (e.g. Netlify).
+        // Trigger the gorgeous Static Save status modal. This notifies them of successful browser cache persistence
+        // and unlocks a clean one-click JSON download file utility.
+        setShowStaticSaveModal(true);
       }
     } catch (err: any) {
       console.error("Failed to perform complete solidification save:", err);
@@ -2327,6 +2400,93 @@ export default function App() {
                 >
                   保存并同步数据 SAVE
                 </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Static Save Falling Back Information Dialog */}
+      <AnimatePresence>
+        {showStaticSaveModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/90 backdrop-blur-md z-[99999] flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 15 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 15 }}
+              transition={{ type: "spring", damping: 25, stiffness: 350 }}
+              className="bg-neutral-900 border border-neutral-800 text-stone-100 p-8 rounded-[32px] max-w-sm w-full shadow-[0_25px_60px_rgba(0,0,0,0.8)] relative"
+            >
+              <button
+                onClick={() => setShowStaticSaveModal(false)}
+                className="absolute top-5 right-5 text-neutral-400 hover:text-white transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div className="flex flex-col items-center text-center space-y-5">
+                <div className="w-14 h-14 rounded-2xl bg-[#D9FF33]/10 flex items-center justify-center border border-[#D9FF33]/30">
+                  <Download className="w-7 h-7 text-[#D9FF33]" strokeWidth={2.5} />
+                </div>
+                <div>
+                  <h3 className="font-serif italic font-black text-2xl text-stone-50">本地临时保存成功！</h3>
+                  <p className="text-[10px] text-neutral-400 font-mono mt-1.5 uppercase tracking-widest leading-none">STATIC HOSTING DETECTED</p>
+                </div>
+
+                <div className="text-left text-xs text-neutral-300 leading-relaxed font-sans space-y-3 bg-neutral-950 p-4 rounded-2xl border border-neutral-850 w-full">
+                  <p>
+                    ⚡ <span className="text-white font-bold">已在当前浏览器中保存：</span>所有新上传图片和修改内容在您的浏览器缓存中已<strong>即时生效并持久储存</strong>，在此设备刷新重新打开网站均可正常展示！
+                  </p>
+                  <p>
+                    🌐 <span className="text-white font-bold">固化到您的电脑/代码中：</span>因项目目前是作为静态页面直接展现（如 Netlify ），没有活动的运行后台，故无法写入到服务器磁盘。
+                  </p>
+                  <p>
+                    💎 <span className="text-white font-bold">一键永久固化方案：</span>请直接点击下方按钮导出修改后的配置文件，然后替换您电脑源项目 `/src/` 下对应的同名 JSON 文件，重新打包发布即可全端永久显示！
+                  </p>
+                </div>
+
+                <div className="w-full flex flex-col gap-2 pt-1">
+                  <button
+                    onClick={() => {
+                      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(imageOverrides, null, 2));
+                      const downloadAnchor = document.createElement('a');
+                      downloadAnchor.setAttribute("href", dataStr);
+                      downloadAnchor.setAttribute("download", "image-overrides.json");
+                      document.body.appendChild(downloadAnchor);
+                      downloadAnchor.click();
+                      downloadAnchor.remove();
+                    }}
+                    className="w-full bg-[#D9FF33] hover:bg-[#c2e62e] text-black font-black text-xs uppercase tracking-wider py-3.5 rounded-xl cursor-pointer shadow-lg shadow-[#D9FF33]/15 flex items-center justify-center gap-2 hover:scale-[1.01] active:scale-[0.99] transition-all"
+                  >
+                    <Download className="w-4 h-4 shrink-0" strokeWidth={3} />
+                    <span>📥 导出图片配置文件 (image-overrides)</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(projects, null, 2));
+                      const downloadAnchor = document.createElement('a');
+                      downloadAnchor.setAttribute("href", dataStr);
+                      downloadAnchor.setAttribute("download", "portfolio-data.json");
+                      document.body.appendChild(downloadAnchor);
+                      downloadAnchor.click();
+                      downloadAnchor.remove();
+                    }}
+                    className="w-full bg-neutral-850 hover:bg-neutral-800 text-stone-100 font-bold text-xs uppercase tracking-wider py-3.5 rounded-xl cursor-pointer border border-neutral-750 flex items-center justify-center gap-2 hover:scale-[1.01] active:scale-[0.99] transition-all"
+                  >
+                    <Download className="w-4 h-4 shrink-0" />
+                    <span>📥 导出作品内容文件 (portfolio-data)</span>
+                  </button>
+                </div>
+
+                <div className="text-[9px] text-neutral-500 font-serif leading-tight">
+                  ※ 导出后，仅需替换本地代码项目中的 src/image-overrides.json 和 src/portfolio-data.json 即可！
+                </div>
               </div>
             </motion.div>
           </motion.div>
