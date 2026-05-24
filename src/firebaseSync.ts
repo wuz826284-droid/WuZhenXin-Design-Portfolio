@@ -1,6 +1,16 @@
 import { db, isFirebaseEnabled } from "./firebase";
 import { doc, setDoc, collection, getDocs, writeBatch, deleteDoc } from "firebase/firestore";
 
+// Helper to prevent infinite hanging when Firestore is unreachable or rules are mismatched
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number = 4000, label: string = "Firestore operation"): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs)
+    )
+  ]);
+}
+
 // Safe Base64 document helper to generate clean, short, valid Firestore IDs
 function getSafeId(url: string): string {
   try {
@@ -21,7 +31,7 @@ export async function fetchLivePortfolio(fallbackData: any[]): Promise<any[]> {
     return fallbackData;
   }
   try {
-    const querySnapshot = await getDocs(collection(db, "portfolio"));
+    const querySnapshot = await withTimeout(getDocs(collection(db, "portfolio")), 4000, "fetchLivePortfolio");
     if (querySnapshot.empty) {
       console.log("Firestore portfolio collection is empty. Bootstrapping with default portfolio items...");
       const batch = writeBatch(db);
@@ -29,7 +39,7 @@ export async function fetchLivePortfolio(fallbackData: any[]): Promise<any[]> {
         const docRef = doc(db, "portfolio", item.id);
         batch.set(docRef, item);
       }
-      await batch.commit();
+      await withTimeout(batch.commit(), 4000, "bootstrapCommit");
       console.log("Firestore portfolio successfully populated with baseline default projects.");
       return fallbackData;
     }
@@ -50,7 +60,7 @@ export async function saveLivePortfolioItem(item: any): Promise<boolean> {
     return false;
   }
   try {
-    await setDoc(doc(db, "portfolio", item.id), item);
+    await withTimeout(setDoc(doc(db, "portfolio", item.id), item), 4000, "saveLivePortfolioItem");
     console.log(`Successfully persisted portfolio category doc: portfolio/${item.id}`);
     return true;
   } catch (err) {
@@ -64,7 +74,7 @@ export async function deleteLivePortfolioItem(itemId: string): Promise<boolean> 
     return false;
   }
   try {
-    await deleteDoc(doc(db, "portfolio", itemId));
+    await withTimeout(deleteDoc(doc(db, "portfolio", itemId)), 4000, "deleteLivePortfolioItem");
     console.log(`Successfully deleted portfolio doc: portfolio/${itemId}`);
     return true;
   } catch (err) {
@@ -79,16 +89,16 @@ export async function saveFullPortfolio(updatedProjects: any[]): Promise<boolean
   }
   try {
     // Delete missing categories
-    const querySnapshot = await getDocs(collection(db, "portfolio"));
+    const querySnapshot = await withTimeout(getDocs(collection(db, "portfolio")), 4000, "saveFullPortfolioFetch");
     const existingIds = updatedProjects.map(p => p.id);
     for (const docSnap of querySnapshot.docs) {
       if (!existingIds.includes(docSnap.id)) {
-        await deleteDoc(doc(db, "portfolio", docSnap.id));
+        await withTimeout(deleteDoc(doc(db, "portfolio", docSnap.id)), 2000, `delete_${docSnap.id}`);
       }
     }
     // Set active categories
     for (const item of updatedProjects) {
-      await setDoc(doc(db, "portfolio", item.id), item);
+      await withTimeout(setDoc(doc(db, "portfolio", item.id), item), 2500, `set_${item.id}`);
     }
     console.log("Full portfolio index successfully updated and synced directly to Firestore.");
     return true;
@@ -103,7 +113,7 @@ export async function fetchLiveOverrides(fallbackOverrides: Record<string, strin
     return fallbackOverrides;
   }
   try {
-    const querySnapshot = await getDocs(collection(db, "image_overrides"));
+    const querySnapshot = await withTimeout(getDocs(collection(db, "image_overrides")), 4000, "fetchLiveOverrides");
     const overrides: Record<string, string> = { ...fallbackOverrides };
     querySnapshot.forEach((doc) => {
       const data = doc.data();
@@ -124,10 +134,10 @@ export async function saveLiveOverride(originalUrl: string, uploadedUrl: string)
   }
   try {
     const safeDocId = getSafeId(originalUrl);
-    await setDoc(doc(db, "image_overrides", safeDocId), {
+    await withTimeout(setDoc(doc(db, "image_overrides", safeDocId), {
       originalUrl,
       uploadedUrl
-    });
+    }), 4000, `saveOverride_${safeDocId}`);
     console.log(`Saved override successfully: image_overrides/${safeDocId}`);
     return true;
   } catch (err) {
